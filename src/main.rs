@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use std::{collections::HashMap, fmt::Display};
 
 const PR_SEATS: usize = 176;
@@ -53,19 +54,13 @@ impl PrDistrict {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
-struct FptpCandidate {
-    name: String,
-    party: Party,
-}
-
 type Party = String;
-type PartyVotes = HashMap<Party, usize>;
-type FptpCandidateVotes = HashMap<FptpCandidate, usize>;
+type PartyVotes = HashMap<Party, f32>;
 
 #[derive(Debug)]
 struct FptpVotes {
-    districts: HashMap<String, FptpCandidateVotes>,
+    // 同一政党から複数人出ることがままある
+    districts: HashMap<String, Vec<FptpCandidateVotes>>,
 }
 
 impl FptpVotes {
@@ -76,9 +71,13 @@ impl FptpVotes {
             .map(|(_district, result)| {
                 result
                     .iter()
-                    .max_by_key(|(_cand, v)| *v)
+                    .max_by(
+                        |FptpCandidateVotes { votes: a, .. },
+                         FptpCandidateVotes { votes: b, .. }| {
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        },
+                    )
                     .unwrap()
-                    .0
                     .party
                     .clone()
             })
@@ -98,10 +97,12 @@ impl PrVotes {
         for (district, dv) in &self.districts {
             let mut table = dv
                 .iter()
-                .map(|(party, votes)| (1..=district.seats()).map(move |i| (party, votes / i)))
+                .map(|(party, votes)| {
+                    (1..=district.seats()).map(move |i| (party, votes / i as f32))
+                })
                 .flatten()
                 .collect::<Vec<_>>();
-            table.sort_by_key(|(_p, v)| *v);
+            table.sort_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             table.reverse();
             table
                 .into_iter()
@@ -180,39 +181,59 @@ struct Seats {
     pr: PrSeats,
 }
 
-fn main() {
-    let fptp = FptpVotes {
-        districts: [(
-            "hokkaido_7".to_owned(),
-            [
-                (
-                    FptpCandidate {
-                        name: "a".to_owned(),
-                        party: "cdp".to_owned(),
-                    },
-                    100000,
-                ),
-                (
-                    FptpCandidate {
-                        name: "b".to_owned(),
-                        party: "ldp".to_owned(),
-                    },
-                    200000,
-                ),
-            ]
-            .into(),
-        )]
-        .into(),
-    };
-    let pr = PrVotes {
-        districts: [(
-            PrDistrict::Hokkaido,
-            [("cdp".to_owned(), 120000), ("ldp".to_owned(), 200000)].into(),
-        )]
-        .into(),
-    };
-    let result = Votes { fptp, pr };
+#[derive(Debug, Deserialize)]
+struct VotesData {
+    pr: HashMap<String, HashMap<String, f32>>,
+    fptp: HashMap<String, Vec<FptpCandidateVotes>>,
+}
 
-    println!("{:?}", result);
-    println!("{:?}", result.get_seats());
+#[derive(Debug, Deserialize)]
+struct FptpCandidateVotes {
+    party: String,
+    votes: f32,
+}
+
+impl From<VotesData> for Votes {
+    fn from(data: VotesData) -> Self {
+        let pr_districts = data
+            .pr
+            .iter()
+            .map(|(district, dv)| {
+                let d = match district.as_ref() {
+                    "北海道" => PrDistrict::Hokkaido,
+                    "東北" => PrDistrict::Tohoku,
+                    "北陸信越" => PrDistrict::HokurikuShinetsu,
+                    "東海" => PrDistrict::Tokai,
+                    "東京都" => PrDistrict::Tokyo,
+                    "北関東" => PrDistrict::KitaKanto,
+                    "南関東" => PrDistrict::MinamiKanto,
+                    "近畿" => PrDistrict::Kinki,
+                    "中国" => PrDistrict::Chugoku,
+                    "四国" => PrDistrict::Shikoku,
+                    "九州" => PrDistrict::Kyushu,
+                    _ => unreachable!(),
+                };
+                (d, dv.clone())
+            })
+            .collect();
+
+        Self {
+            pr: PrVotes {
+                districts: pr_districts,
+            },
+            fptp: FptpVotes {
+                districts: data.fptp,
+            },
+        }
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let content = std::fs::read_to_string("./data/2021_rep.json")?;
+    let data: VotesData = serde_json::from_str(&content)?;
+    let votes: Votes = data.into();
+    println!("{:?}", votes);
+    println!("{:?}", votes.get_seats());
+
+    Ok(())
 }
